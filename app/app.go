@@ -350,7 +350,6 @@ func (app *EthermintApplication) validateStakingTx(tx *ethTypes.Transaction) abc
 
 	// Heuristic limit, reject transactions over 32KB to prevent DOS attacks
 	if tx.Size() > maxTransactionSize {
-		fmt.Println("_________________________________1")
 		return abciTypes.ResponseCheckTx {
 			Code: errors.CodeTypeInternalErr,
 			Log: core.ErrOversizedData.Error()}
@@ -364,7 +363,6 @@ func (app *EthermintApplication) validateStakingTx(tx *ethTypes.Transaction) abc
 	// Make sure the transaction is signed properly
 	from, err := ethTypes.Sender(signer, tx)
 	if err != nil {
-		fmt.Println("_________________________________2")
 		// TODO: Add errors.CodeTypeInvalidSignature ?
 		return abciTypes.ResponseCheckTx {
 			Code: errors.CodeTypeInternalErr,
@@ -382,7 +380,6 @@ func (app *EthermintApplication) validateStakingTx(tx *ethTypes.Transaction) abc
 
 	// Make sure the account exist - cant send from non-existing account.
 	if !currentState.Exist(from) {
-		fmt.Println("_________________________________3")
 		return abciTypes.ResponseCheckTx {
 			Code: errors.CodeTypeUnknownAddress,
 			Log: core.ErrInvalidSender.Error()}
@@ -399,7 +396,6 @@ func (app *EthermintApplication) validateStakingTx(tx *ethTypes.Transaction) abc
 	// Check if nonce is not strictly increasing
 	nonce := currentState.GetNonce(from)
 	if nonce != tx.Nonce() {
-		fmt.Println("_________________________________4")
 		return abciTypes.ResponseCheckTx{
 			Code: errors.CodeTypeBadNonce,
 			Log:  fmt.Sprintf(
@@ -410,7 +406,7 @@ func (app *EthermintApplication) validateStakingTx(tx *ethTypes.Transaction) abc
 	// Transactor should have enough funds to cover the costs
 	// cost == V      // No GP * GL
 	currentBalance := currentState.GetBalance(from)
-	if tx.Withdraw() {
+	if tx.Refund() {
 		currentBalance = currentState.GetBalance(*tx.To())
 	}
 	if currentBalance.Cmp(tx.Value()) < 0 {
