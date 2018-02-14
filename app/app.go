@@ -4,7 +4,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"math/big"
+	"bytes"
 
+	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/core"
 	"github.com/ethereum/go-ethereum/core/state"
 	ethTypes "github.com/ethereum/go-ethereum/core/types"
@@ -16,6 +18,10 @@ import (
 	"github.com/cosmos/cosmos-sdk/errors"
 	abciTypes "github.com/tendermint/abci/types"
 	tmLog "github.com/tendermint/tmlibs/log"
+)
+
+var (
+	StakingAddress = common.HexToAddress("0x0000000000000000000000000000000000000000")
 )
 
 // EthermintApplication implements an ABCI application
@@ -138,7 +144,11 @@ func (app *EthermintApplication) CheckTx(txBytes []byte) abciTypes.ResponseCheck
 	}
 	app.logger.Debug("CheckTx: Received valid transaction", "tx", tx) // nolint: errcheck
 
-	return app.validateTx(tx)
+	if tx.To() != nil && bytes.Equal(tx.To().Bytes(), StakingAddress.Bytes()) {
+		return app.validateStakingTx(tx)
+	} else {
+		return app.validateTx(tx)
+	}
 }
 
 // DeliverTx executes a transaction against the latest state
@@ -187,7 +197,7 @@ func (app *EthermintApplication) EndBlock(endBlock abciTypes.RequestEndBlock) (
 	abciTypes.ResponseEndBlock) {
 
 	app.logger.Debug("EndBlock", "height", endBlock.GetHeight()) // nolint: errcheck
-	app.backend.AccumulateRewards(app.strategy)
+	//app.backend.AccumulateRewards(app.strategy)
 	return app.GetUpdatedValidators()
 }
 
@@ -325,6 +335,102 @@ func (app *EthermintApplication) validateTx(tx *ethTypes.Transaction) abciTypes.
 	// Update ether balances
 	// amount + gasprice * gaslimit
 	currentState.SubBalance(from, tx.Cost())
+	// tx.To() returns a pointer to a common address. It returns nil
+	// if it is a contract creation transaction.
+	if to := tx.To(); to != nil {
+		currentState.AddBalance(*to, tx.Value())
+	}
+	currentState.SetNonce(from, tx.Nonce()+1)
+
+	return abciTypes.ResponseCheckTx{Code: abciTypes.CodeTypeOK}
+}
+
+// validateTravisTx checks the validity of a tx against the blockchain's current state.
+func (app *EthermintApplication) validateStakingTx(tx *ethTypes.Transaction) abciTypes.ResponseCheckTx {
+
+	// Heuristic limit, reject transactions over 32KB to prevent DOS attacks
+	if tx.Size() > maxTransactionSize {
+		fmt.Println("_________________________________1")
+		return abciTypes.ResponseCheckTx {
+			Code: errors.CodeTypeInternalErr,
+			Log: core.ErrOversizedData.Error()}
+	}
+
+	var signer ethTypes.Signer = ethTypes.FrontierSigner{}
+	if tx.Protected() {
+		signer = ethTypes.NewEIP155Signer(tx.ChainId())
+	}
+
+	// Make sure the transaction is signed properly
+	from, err := ethTypes.Sender(signer, tx)
+	if err != nil {
+		fmt.Println("_________________________________2")
+		// TODO: Add errors.CodeTypeInvalidSignature ?
+		return abciTypes.ResponseCheckTx {
+			Code: errors.CodeTypeInternalErr,
+			Log: core.ErrInvalidSender.Error()}
+	}
+
+	// Transactions can be negative. It is for unbind staking
+	//if tx.Value().Sign() < 0 {
+	//	return abciTypes.ResponseCheckTx {
+	//		Code: errors.CodeTypeBaseInvalidInput,
+	//		Log: core.ErrNegativeValue.Error()}
+	//}
+
+	currentState := app.checkTxState
+
+	// Make sure the account exist - cant send from non-existing account.
+	if !currentState.Exist(from) {
+		fmt.Println("_________________________________3")
+		return abciTypes.ResponseCheckTx {
+			Code: errors.CodeTypeUnknownAddress,
+			Log: core.ErrInvalidSender.Error()}
+	}
+
+	// Do not need gas
+	//gasLimit := app.backend.GasLimit()
+	//if gasLimit.Cmp(tx.Gas()) < 0 {
+	//	return abciTypes.ResponseCheckTx {
+	//		Code: errors.CodeTypeInternalErr,
+	//		Log: core.ErrGasLimitReached.Error()}
+	//}
+
+	// Check if nonce is not strictly increasing
+	nonce := currentState.GetNonce(from)
+	if nonce != tx.Nonce() {
+		fmt.Println("_________________________________4")
+		return abciTypes.ResponseCheckTx{
+			Code: errors.CodeTypeBadNonce,
+			Log:  fmt.Sprintf(
+				"Nonce not strictly increasing. Expected %d Got %d",
+				nonce, tx.Nonce())}
+	}
+
+	// Transactor should have enough funds to cover the costs
+	// cost == V      // No GP * GL
+	currentBalance := currentState.GetBalance(from)
+	if tx.Withdraw() {
+		currentBalance = currentState.GetBalance(*tx.To())
+	}
+	if currentBalance.Cmp(tx.Value()) < 0 {
+		return abciTypes.ResponseCheckTx{
+			// TODO: Add errors.CodeTypeInsufficientFunds ?
+			Code: errors.CodeTypeBaseInvalidInput,
+			Log:  fmt.Sprintf(
+				"Current balance: %s, tx cost: %s",
+				currentBalance, tx.Value())}
+	}
+
+	//intrGas := core.IntrinsicGas(tx.Data(), tx.To() == nil, true) // homestead == true
+	//if tx.Gas().Cmp(intrGas) < 0 {
+	//	return abciTypes.ResponseCheckTx {
+	//		Code: errors.CodeTypeBaseInvalidInput,
+	//		Log: core.ErrIntrinsicGas.Error()}
+	//}
+
+	// Update ether balances
+	currentState.SubBalance(from, tx.Value())
 	// tx.To() returns a pointer to a common address. It returns nil
 	// if it is a contract creation transaction.
 	if to := tx.To(); to != nil {
